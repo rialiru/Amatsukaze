@@ -63,6 +63,9 @@ public:
 
     void reset();
 
+    // シーク後にパケット組み立て状態だけを破棄し、確認済みの形式は保持する。
+    void resetInputState();
+
 protected:
 
     virtual void onPesPacket(int64_t clock, PESPacket packet);

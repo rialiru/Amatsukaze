@@ -175,6 +175,9 @@ class PesParser : public TsPacketHandler {
 public:
     PesParser();
 
+    // シーク後に途中まで組み立てたPESを破棄する。
+    void resetInputState();
+
     /** @brief TSパケット(チェック済み)を入力 */
     virtual void onTsPacket(int64_t clock, TsPacket packet);
 
@@ -514,6 +517,9 @@ public:
 
     PsiUpdatedDetector(AMTContext&ctx);
 
+    // シーク後に途中まで組み立てたセクションを破棄する。
+    void resetInputState();
+
 protected:
     virtual void onPsiSection(int64_t clock, PsiSection section);
 
@@ -536,6 +542,12 @@ public:
     * ハンドラが別のpidにひも付けされている場合解除されてから新しくセットされる
     */
     bool add(int pid, TsPacketHandler* handler, bool overwrite = true);
+
+    // 指定PIDの動的ハンドラだけを解除する。
+    void remove(int pid, TsPacketHandler* handler);
+
+    // 全ハンドラを解除する。初期化時のみ使用する。
+    void reset();
 
     TsPacketHandler* get(int pid);
 

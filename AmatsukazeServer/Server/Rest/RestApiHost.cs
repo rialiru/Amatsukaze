@@ -289,11 +289,7 @@ namespace Amatsukaze.Server.Rest
                 builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
             }
             builder.Services.Configure<JsonOptions>(options =>
-            {
-                options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-                options.SerializerOptions.IncludeFields = true;
-                options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
-            });
+                ConfigureRestJsonOptions(options.SerializerOptions));
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy("LocalCors", policy =>
@@ -2865,10 +2861,16 @@ namespace Amatsukaze.Server.Rest
             var options = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
-                IncludeFields = true
             };
-            options.Converters.Add(new JsonStringEnumConverter());
+            ConfigureRestJsonOptions(options);
             return options;
+        }
+
+        public static void ConfigureRestJsonOptions(JsonSerializerOptions options)
+        {
+            options.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+            options.IncludeFields = true;
+            options.Converters.Add(new JsonStringEnumConverter());
         }
     }
 }

@@ -23,6 +23,12 @@ namespace Amatsukaze.Server
 
         public List<QueueItem> Queue { get; private set; } = new List<QueueItem>();
 
+        // Native TS probe の分類を共有してテストできるようにする中立シーム。
+        internal static void ApplyResolutionProbeResult(QueueItem item, Program program, int probeStatus)
+        {
+            ResolutionProbeClassification.Apply(item, program, probeStatus);
+        }
+
         class ConsoleText : ConsoleTextBase
         {
             private static log4net.ILog LOG = log4net.LogManager.GetLogger("UserScript.Add");
@@ -333,7 +339,7 @@ namespace Amatsukaze.Server
         // 戻り値: 状態が変わった
         public bool UpdateQueueItem(QueueItem item, List<Task> waits)
         {
-            if (item.State == QueueState.LogoPending || item.State == QueueState.Queue)
+            if (ResolutionProbeClassification.CanAutomaticallyQueue(item))
             {
                 var prevState = item.State;
                 if(item.Mode == ProcMode.DrcsCheck)
@@ -483,6 +489,7 @@ namespace Amatsukaze.Server
                     {
                         failReason = "TSファイルに映像が見つかりませんでした";
                         var list = info.GetProgramList();
+                        var resolutionProbeStatus = info.GetResolutionProbeStatus();
                         var videopids = new List<int>();
                         int numFiles = 0;
                         for (int i = 0; i < list.Length; i++)
@@ -543,12 +550,8 @@ namespace Amatsukaze.Server
                                     };
                                     item.ResetAutoLogoAttempt();
 
-                                    if (item.IsOneSeg)
-                                    {
-                                        item.State = QueueState.PreFailed;
-                                        item.FailReason = "映像が小さすぎます(" + prog.Width + "," + prog.Height + ")";
-                                    }
-                                    else
+                                    ApplyResolutionProbeResult(item, prog, resolutionProbeStatus);
+                                    if (item.State != QueueState.PreFailed)
                                     {
                                         // ロゴファイルを探す
                                         if (req.Mode != ProcMode.DrcsCheck && map.ContainsKey(item.ServiceId) == false)
@@ -731,6 +734,40 @@ namespace Amatsukaze.Server
             item.Reset();
             UpdateQueueItem(item, waits);
             waits.Add(NotifyQueueItemUpdate(item));
+        }
+
+        private async Task RetryResolutionClassification(QueueItem item)
+        {
+            using (var info = new TsInfo(amtcontext))
+            {
+                if (!await Task.Run(() => info.ReadFile(item.SrcPath)))
+                {
+                    await server.NotifyError(
+                        "TS情報を再取得できませんでした。映像形式と解像度を手動で確認してください", false);
+                    return;
+                }
+
+                var program = info.GetProgramList()
+                    .FirstOrDefault(p => p.HasVideo && p.ServiceId == item.ServiceId);
+                ApplyResolutionProbeResult(item, program, info.GetResolutionProbeStatus());
+                var waits = new List<Task>();
+                if (item.State != QueueState.PreFailed)
+                {
+                    UpdateProfileItem(item, waits);
+                    ResetStateItem(item, waits);
+                }
+                else
+                {
+                    UpdateQueueItem(item, waits);
+                    waits.Add(NotifyQueueItemUpdate(item));
+                }
+                waits.Add(server.NotifyMessage(
+                    item.State == QueueState.PreFailed
+                        ? "映像形式の確認結果を更新しました。手動確認が必要です"
+                        : "映像形式を再確認し、アイテムをキューに戻しました",
+                    false));
+                await Task.WhenAll(waits);
+            }
         }
 
         // アイテムのProfileNameからプロファイルを決定して、
@@ -1152,7 +1189,7 @@ namespace Amatsukaze.Server
                 data.ChangeType == ChangeItemType.UpdateProfile ||
                 data.ChangeType == ChangeItemType.Duplicate)
             {
-                if(target.State == QueueState.PreFailed)
+                if (!ResolutionProbeClassification.AllowsQueueChange(target, data.ChangeType))
                 {
                     return server.NotifyError("このアイテムは追加処理に失敗しているため操作できません", false);
                 }
@@ -1208,6 +1245,10 @@ namespace Amatsukaze.Server
                     if (!string.IsNullOrEmpty(data.Profile))
                     {
                         target.ProfileName = data.Profile;
+                    }
+                    if (ResolutionProbeClassification.IsResolutionReviewItem(target))
+                    {
+                        return RetryResolutionClassification(target);
                     }
                     // リトライはプロファイル再適用も行う
                     UpdateProfileItem(target, waits);

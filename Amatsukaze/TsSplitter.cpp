@@ -303,7 +303,13 @@ void VideoFrameParser::setStreamFormat(VIDEO_STREAM_FORMAT streamFormat) {
 VIDEO_STREAM_FORMAT VideoFrameParser::getStreamFormat() { return videoStreamFormat; }
 
 void VideoFrameParser::reset() {
+    PesParser::resetInputState();
     videoFormat = VideoFormat();
+    parser->reset();
+}
+
+void VideoFrameParser::resetInputState() {
+    PesParser::resetInputState();
     parser->reset();
 }
 

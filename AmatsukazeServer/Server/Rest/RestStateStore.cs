@@ -966,7 +966,7 @@ namespace Amatsukaze.Server.Rest
             };
         }
 
-        private Amatsukaze.Shared.QueueItemView ToQueueItemView(QueueItem item)
+        public static Amatsukaze.Shared.QueueItemView ToQueueItemView(QueueItem item)
         {
             return new Amatsukaze.Shared.QueueItemView()
             {
@@ -980,6 +980,7 @@ namespace Amatsukaze.Server.Rest
                 State = item.State.ToString(),
                 StateLabel = GetStateLabel(item),
                 StateDetailText = GetStateDetailText(item),
+                FailReasonCode = item.FailReasonCode,
                 AutoLogoState = GetAutoLogoState(item),
                 Priority = item.Priority,
                 IsBatch = item.IsBatch,

@@ -309,6 +309,11 @@ void TsPacketParser::checkAndOutPacket(MemoryChunk data) {
 }
 PesParser::PesParser() : contCounter(0) {}
 
+void PesParser::resetInputState() {
+    buffer.clear();
+    contCounter = 0;
+}
+
 /** @brief TSパケット(チェック済み)を入力 */
 /* virtual */ void PesParser::onTsPacket(int64_t clock, TsPacket packet) {
 
@@ -753,6 +758,10 @@ void PsiParser::checkAndOutSection() {
 
 PsiUpdatedDetector::PsiUpdatedDetector(AMTContext&ctx)
     : PsiParser(ctx) {}
+void PsiUpdatedDetector::resetInputState() {
+    clear();
+    curSection.clear();
+}
 /* virtual */ void PsiUpdatedDetector::onPsiSection(int64_t clock, PsiSection section) {
     if (section != curSection.get()) {
         curSection.clear();
@@ -800,6 +809,27 @@ bool PidHandlerTable::add(int pid, TsPacketHandler* handler, bool overwrite) {
 
 TsPacketHandler* PidHandlerTable::get(int pid) {
     return table[pid];
+}
+
+void PidHandlerTable::remove(int pid, TsPacketHandler* handler) {
+    if (pid < 0 || pid > MAX_PID || handler == nullptr || table[pid] != handler) {
+        return;
+    }
+    auto constant = constHandlers.find(pid);
+    if (constant != constHandlers.end()) {
+        table[pid] = constant->second;
+    } else {
+        table[pid] = nullptr;
+    }
+    handlers.erase(handler);
+}
+
+void PidHandlerTable::reset() {
+    for (int pid = 0; pid <= MAX_PID; ++pid) {
+        table[pid] = nullptr;
+    }
+    constHandlers.clear();
+    handlers.clear();
 }
 
 void PidHandlerTable::clear() {

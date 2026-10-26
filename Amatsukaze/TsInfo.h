@@ -13,6 +13,7 @@
 #include "CoreUtils.hpp"
 
 #include <stdint.h>
+#include <stddef.h>
 
 #include <memory>
 
@@ -21,6 +22,12 @@ struct ProgramInfo {
     bool hasVideo;
     int videoPid; // 同じ映像の別サービスに注意
     VideoFormat videoFormat;
+};
+
+enum class TsInfoResolutionProbeStatus {
+    Resolved = 0,
+    UnknownResolution = 1,
+    ReadBudgetExhausted = 2
 };
 
 struct ServiceInfo {
@@ -54,6 +61,14 @@ public:
     void inputTsPacket(int64_t clock, TsPacket packet);
 
     bool isProgramOK() const;
+
+    bool hasVideoProgram() const;
+
+    bool hasUsableVideoFormat() const;
+
+    void reset();
+
+    void resetInputState();
 
     bool isScrampbled() const;
 
@@ -103,6 +118,7 @@ private:
         bool programOK;
         bool hasScramble;
         int pmtPid;
+        VIDEO_STREAM_FORMAT pmtVideoFormat;
         std::unique_ptr<PSIDelegator> pmtHandler;
         std::unique_ptr<VideoFrameParser> videoHandler;
 
@@ -156,6 +172,8 @@ private:
     void onTDT(PsiSection section);
 
     void onTOT(PsiSection section);
+
+    void resetProgramVideoFormat(int videoPid);
 };
 
 class TsInfo : public AMTObject {
@@ -167,6 +185,8 @@ public:
     bool ReadFileFromC(const tchar* filepath);
 
     bool HasServiceInfo();
+
+    TsInfoResolutionProbeStatus GetResolutionProbeStatus() const;
 
     // ref intで受け取る
     void GetDay(int* y, int* m, int* d);
@@ -216,7 +236,9 @@ private:
 
     TsInfoParser parser;
 
-    int ReadTS(File& srcfile);
+    int ReadTS(File& srcfile, size_t byteBudget);
+
+    size_t totalProbeBytes;
 };
 
 typedef bool(*TS_SLIM_CALLBACK)();

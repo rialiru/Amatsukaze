@@ -1691,6 +1691,8 @@ namespace Amatsukaze.Server
         [DataMember]
         public string FailReason { get; set; }
         [DataMember]
+        public string FailReasonCode { get; set; }
+        [DataMember]
         public string JlsCommand { get; set; }
 
         [DataMember]
@@ -1781,7 +1783,9 @@ namespace Amatsukaze.Server
 
         public bool IsOneSeg {
             get {
-                return ImageWidth <= 320 || ImageHeight <= 260;
+                return StreamFormat != VideoStreamFormat.Unknown &&
+                    ImageWidth > 0 && ImageHeight > 0 &&
+                    (ImageWidth <= 320 || ImageHeight <= 260);
             }
         }
 

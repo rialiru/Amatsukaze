@@ -230,6 +230,9 @@ namespace Amatsukaze.Lib
         private static extern int TsInfo_HasServiceInfo(IntPtr ptr);
 
         [DllImport(AmatsukazeNatives.AmatsukazeLibName)]
+        private static extern int TsInfo_GetResolutionProbeStatus(IntPtr ptr);
+
+        [DllImport(AmatsukazeNatives.AmatsukazeLibName)]
         private static extern void TsInfo_GetDay(IntPtr ptr, out int y, out int m, out int d);
 
         [DllImport(AmatsukazeNatives.AmatsukazeLibName)]
@@ -321,6 +324,11 @@ namespace Amatsukaze.Lib
             {
                 return TsInfo_HasServiceInfo(Ptr) != 0;
             }
+        }
+
+        public int GetResolutionProbeStatus()
+        {
+            return TsInfo_GetResolutionProbeStatus(Ptr);
         }
 
         public Program[] GetProgramList()

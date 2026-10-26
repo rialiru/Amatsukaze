@@ -8,12 +8,32 @@
 
 #include "TsInfo.h"
 
+namespace {
+constexpr size_t TS_INFO_BUFFER_BYTES = 4 * 1024 * 1024;
+constexpr size_t TS_INFO_PROBE_WINDOW_BYTES = 100 * 1024 * 1024;
+constexpr size_t TS_INFO_PROBE_TOTAL_BYTES = 2 * TS_INFO_PROBE_WINDOW_BYTES;
+}
+
 TsInfoParser::TsInfoParser(AMTContext& ctx)
     : AMTObject(ctx)
     , patOK(false)
     , serviceOK(false)
     , timeOK(false)
     , numPrograms(0) {
+    reset();
+}
+
+void TsInfoParser::reset() {
+    handlerTable.reset();
+    psiHandlers.clear();
+    programList.clear();
+    serviceList.clear();
+    patOK = false;
+    serviceOK = false;
+    timeOK = false;
+    numPrograms = 0;
+    time = JSTTime();
+    startTime = JSTTime();
     AddConstantHandler(0x0000); // PAT
     AddConstantHandler(0x0011); // SDT/BAT
     AddConstantHandler(0x0012); // H-EIT
@@ -34,9 +54,54 @@ bool TsInfoParser::isProgramOK() const {
     for (int i = 0; i < numPrograms; i++) {
         // 全プログラムのパケットがあるとは限らないので
         // 1つでも映像のあるプログラムが取得できればOKとする
-        if (programList[i].programOK && programList[i].hasVideo) return true;
+        if (programList[i].programOK && programList[i].hasVideo &&
+            programList[i].videoFormat.format != VS_UNKNOWN &&
+            programList[i].videoFormat.width > 0 && programList[i].videoFormat.height > 0) return true;
     }
     return false;
+}
+
+bool TsInfoParser::hasVideoProgram() const {
+    for (const auto& program : programList) {
+        if (program.hasVideo) return true;
+    }
+    return false;
+}
+
+bool TsInfoParser::hasUsableVideoFormat() const {
+    for (const auto& program : programList) {
+        if (program.hasVideo && program.programOK &&
+            program.videoFormat.format != VS_UNKNOWN &&
+            program.videoFormat.width > 0 && program.videoFormat.height > 0) return true;
+    }
+    return false;
+}
+
+void TsInfoParser::resetInputState() {
+    for (const auto& handler : psiHandlers) {
+        handler->resetInputState();
+    }
+    for (size_t i = 0; i < programList.size(); ++i) {
+        auto* videoHandler = programList[i].videoHandler.get();
+        if (videoHandler == nullptr) continue;
+        bool alreadyReset = false;
+        for (size_t j = 0; j < i; ++j) {
+            if (programList[j].videoHandler.get() == videoHandler) {
+                alreadyReset = true;
+                break;
+            }
+        }
+        if (!alreadyReset) videoHandler->resetInputState();
+    }
+}
+
+void TsInfoParser::resetProgramVideoFormat(int videoPid) {
+    for (int i = 0; i < (int)programList.size(); ++i) {
+        if (programList[i].videoPid == videoPid) {
+            programList[i].videoFormat = VideoFormat();
+            programList[i].programOK = false;
+        }
+    }
 }
 
 bool TsInfoParser::isScrampbled() const {
@@ -162,8 +227,13 @@ void TsInfoParser::onPMT(int pid, PsiSection section) {
         // 該当プログラムを探す
         ProgramItem* item = getProgramItem(pmt.program_number());
         if (item != nullptr && item->pmtPid == pid) { // PMT-PIDが合ってるかもチェック
+            const int oldVideoPid = item->videoPid;
+            const VIDEO_STREAM_FORMAT oldVideoFormat = item->pmtVideoFormat;
+            auto* oldVideoHandler = item->videoHandler.get();
             // 映像をみつける
             item->hasVideo = false;
+            item->videoPid = -1;
+            item->pmtVideoFormat = VS_UNKNOWN;
             for (int i = 0; i < pmt.numElems(); i++) {
                 PMTElement elem = pmt.get(i);
                 uint8_t stream_type = elem.stream_type();
@@ -182,6 +252,40 @@ void TsInfoParser::onPMT(int pid, PsiSection section) {
                 if (type != VS_UNKNOWN) {
                     int videoPid = elem.elementary_PID();
 
+                    const bool pidChanged = oldVideoPid != videoPid;
+                    const bool formatChanged = oldVideoPid == videoPid &&
+                        oldVideoFormat != VS_UNKNOWN && oldVideoFormat != type;
+                    if (pidChanged || formatChanged) {
+                        item->programOK = false;
+                        item->videoFormat = VideoFormat();
+                    }
+                    if (formatChanged) {
+                        resetProgramVideoFormat(videoPid);
+                        for (int j = 0; j < (int)numPrograms; ++j) {
+                            if (programList[j].videoPid == videoPid) {
+                                programList[j].pmtVideoFormat = type;
+                            }
+                        }
+                    }
+
+                    if (pidChanged && oldVideoPid >= 0 && oldVideoHandler != nullptr) {
+                        ProgramItem* replacement = nullptr;
+                        for (int j = 0; j < (int)numPrograms; ++j) {
+                            if (&programList[j] != item && programList[j].hasVideo &&
+                                programList[j].videoPid == oldVideoPid) {
+                                replacement = &programList[j];
+                                break;
+                            }
+                        }
+                        if (replacement != nullptr) {
+                            auto replacementHandler = std::unique_ptr<SpVideoFrameParser>(
+                                new SpVideoFrameParser(ctx, *this, replacement));
+                            replacementHandler->setStreamFormat(replacement->pmtVideoFormat);
+                            handlerTable.add(oldVideoPid, replacementHandler.get());
+                            replacement->videoHandler = std::move(replacementHandler);
+                        }
+                    }
+
                     // 同じvideoPidのプログラムを探す
                     ProgramItem* top = nullptr;
                     for (int i = 0; i < (int)numPrograms; i++) {
@@ -194,6 +298,7 @@ void TsInfoParser::onPMT(int pid, PsiSection section) {
 
                     item->hasVideo = true;
                     item->videoPid = videoPid;
+                    item->pmtVideoFormat = type;
 
                     if (top == nullptr) {
                         // 自分が最初なので取得する
@@ -201,11 +306,22 @@ void TsInfoParser::onPMT(int pid, PsiSection section) {
                             item->videoHandler =
                                 std::unique_ptr<SpVideoFrameParser>(new SpVideoFrameParser(ctx, *this, item));
                         }
+                        if (pidChanged || formatChanged) {
+                            item->videoHandler->reset();
+                        }
                         item->videoHandler->setStreamFormat(type);
                         handlerTable.add(item->videoPid, item->videoHandler.get());
                     } else {
+                        if (item->videoHandler != nullptr && item->videoHandler.get() != top->videoHandler.get()) {
+                            if (oldVideoPid >= 0) handlerTable.remove(oldVideoPid, item->videoHandler.get());
+                            item->videoHandler.reset();
+                        }
+                        if (formatChanged && top->videoHandler != nullptr) {
+                            top->videoHandler->setStreamFormat(type);
+                        }
                         // 自分は先頭ではないので、先頭のフォーマットをもらう
-                        if (top->programOK) {
+                        if (top->programOK && top->videoFormat.format != VS_UNKNOWN &&
+                            top->videoFormat.width > 0 && top->videoFormat.height > 0) {
                             item->videoFormat = top->videoFormat;
                             item->programOK = true;
                         }
@@ -216,6 +332,27 @@ void TsInfoParser::onPMT(int pid, PsiSection section) {
             if (item->hasVideo == false) {
                 // このプログラムには対応する映像がない
                 item->programOK = true;
+                item->videoFormat = VideoFormat();
+                if (oldVideoHandler != nullptr) {
+                    ProgramItem* replacement = nullptr;
+                    for (int i = 0; i < (int)numPrograms; ++i) {
+                        if (&programList[i] != item && programList[i].hasVideo &&
+                            programList[i].videoPid == oldVideoPid) {
+                            replacement = &programList[i];
+                            break;
+                        }
+                    }
+                    if (replacement != nullptr) {
+                        auto replacementHandler = std::unique_ptr<SpVideoFrameParser>(
+                            new SpVideoFrameParser(ctx, *this, replacement));
+                        replacementHandler->setStreamFormat(replacement->pmtVideoFormat);
+                        handlerTable.add(oldVideoPid, replacementHandler.get());
+                        replacement->videoHandler = std::move(replacementHandler);
+                    } else if (oldVideoPid >= 0) {
+                        handlerTable.remove(oldVideoPid, oldVideoHandler);
+                    }
+                    item->videoHandler.reset();
+                }
             }
         }
     }
@@ -327,6 +464,7 @@ TsInfoParser::ProgramItem::ProgramItem()
     : programOK(false)
     , hasScramble(false)
     , pmtPid(-1)
+    , pmtVideoFormat(VS_UNKNOWN)
     , eventOK(false) {
     programId = -1;
     hasVideo = false;
@@ -365,27 +503,34 @@ void TsInfoParser::SpVideoFrameParser::onVideoFormatChanged(VideoFormat fmt) {
 
 TsInfo::TsInfo(AMTContext& ctx)
     : AMTObject(ctx)
-    , parser(ctx) {}
+    , parser(ctx)
+    , totalProbeBytes(0) {}
 
 void TsInfo::ReadFile(const tchar* filepath) {
     File srcfile(filepath, _T("rb"));
+    totalProbeBytes = 0;
+    parser.reset();
     // ファイルの真ん中を読む
     srcfile.seek(srcfile.size() / 2, SEEK_SET);
-    int ret = ReadTS(srcfile);
+    int ret = ReadTS(srcfile, TS_INFO_PROBE_WINDOW_BYTES);
     if (ret == 0) {
         return;
     }
     bool isScrampbled = (ret == 2);
-    bool noEITButProgramOK = (ret == 3);
     // ダメだったらファイルの先頭付近を読む
     srcfile.seek(srcfile.size() / 30, SEEK_SET);
-    ret = ReadTS(srcfile);
+    ret = ReadTS(srcfile, std::min(TS_INFO_PROBE_WINDOW_BYTES, TS_INFO_PROBE_TOTAL_BYTES - totalProbeBytes));
     // 2回目でEITが取れた or 取れなくてもProgramOKなら成功
     if (ret == 0 || ret == 3) {
         return;
     }
+    isScrampbled = isScrampbled || ret == 2;
     if (isScrampbled) {
         THROW(FormatException, "すべてのプログラムがスクランブルされています");
+    } else if (parser.hasVideoProgram()) {
+        // 映像PIDはPMTから確認できているが、実際の映像形式を確認できなかった場合も
+        // キューに登録して手動確認できるようにする。
+        return;
     } else {
         THROW(FormatException, "TSファイルに情報がありません");
     }
@@ -403,6 +548,16 @@ bool TsInfo::ReadFileFromC(const tchar* filepath) {
 
 bool TsInfo::HasServiceInfo() {
     return parser.hasServiceInfo();
+}
+
+TsInfoResolutionProbeStatus TsInfo::GetResolutionProbeStatus() const {
+    if (parser.hasUsableVideoFormat()) {
+        return TsInfoResolutionProbeStatus::Resolved;
+    }
+    if (totalProbeBytes >= TS_INFO_PROBE_TOTAL_BYTES) {
+        return TsInfoResolutionProbeStatus::ReadBudgetExhausted;
+    }
+    return TsInfoResolutionProbeStatus::UnknownResolution;
 }
 
 // ref intで受け取る
@@ -493,24 +648,25 @@ std::vector<int> TsInfo::getSetPids() const {
     return parser.getSetPids();
 }
 
-int TsInfo::ReadTS(File& srcfile) {
-    enum {
-        BUFSIZE = 4 * 1024 * 1024,
-        MAX_BYTES = 100 * 1024 * 1024
-    };
-    auto buffer_ptr = std::unique_ptr<uint8_t[]>(new uint8_t[BUFSIZE]);
-    MemoryChunk buffer(buffer_ptr.get(), BUFSIZE);
-    size_t totalRead = 0;
+int TsInfo::ReadTS(File& srcfile, size_t byteBudget) {
+    auto buffer_ptr = std::unique_ptr<uint8_t[]>(new uint8_t[TS_INFO_BUFFER_BYTES]);
+    size_t bytesThisWindow = 0;
     size_t readBytes;
     SpTsPacketParser packetParser(*this);
-    do {
+    parser.resetInputState();
+    while (bytesThisWindow < byteBudget) {
+        const size_t requestBytes = std::min(TS_INFO_BUFFER_BYTES, byteBudget - bytesThisWindow);
+        MemoryChunk buffer(buffer_ptr.get(), requestBytes);
         readBytes = srcfile.read(buffer);
+        totalProbeBytes += readBytes;
+        bytesThisWindow += readBytes;
         packetParser.inputTS(MemoryChunk(buffer.data, readBytes));
         if (parser.isOK()) return 0;
-        // EITが1つでも取得でき、かつServiceInfo(TDT/TOT, SDT)があるなら成功とする
-        if (parser.hasServiceInfo() && parser.getStartTime().time != 0) return 0;
-        totalRead += readBytes;
-    } while (readBytes == buffer.length && totalRead < MAX_BYTES);
+        // EITと時刻・サービス情報を優先し、実データで映像形式と正の解像度を確認してから終了する。
+        if (parser.hasServiceInfo() && parser.getStartTime().time != 0 &&
+            parser.hasUsableVideoFormat()) return 0;
+        if (readBytes < requestBytes) break;
+    }
     if (parser.isProgramOK()) {
         // EIT(start_time)未取得なら「再試行を促すコード(3)」を返す
         if (parser.getStartTime().time == 0) return 3;
@@ -525,6 +681,9 @@ extern "C" AMATSUKAZE_API void* TsInfo_Create(AMTContext * ctx) { return new TsI
 extern "C" AMATSUKAZE_API void TsInfo_Delete(TsInfo * ptr) { delete ptr; }
 extern "C" AMATSUKAZE_API int TsInfo_ReadFile(TsInfo * ptr, const tchar * filepath) { return ptr->ReadFileFromC(filepath); }
 extern "C" AMATSUKAZE_API int TsInfo_HasServiceInfo(TsInfo * ptr) { return ptr->HasServiceInfo(); }
+extern "C" AMATSUKAZE_API int TsInfo_GetResolutionProbeStatus(TsInfo * ptr) {
+    return static_cast<int>(ptr->GetResolutionProbeStatus());
+}
 extern "C" AMATSUKAZE_API void TsInfo_GetDay(TsInfo * ptr, int* y, int* m, int* d) { ptr->GetDay(y, m, d); }
 extern "C" AMATSUKAZE_API void TsInfo_GetTime(TsInfo * ptr, int* h, int* m, int* s) { return ptr->GetTime(h, m, s); }
 extern "C" AMATSUKAZE_API void TsInfo_GetStartDay(TsInfo * ptr, int* y, int* m, int* d) { ptr->GetStartDay(y, m, d); }
